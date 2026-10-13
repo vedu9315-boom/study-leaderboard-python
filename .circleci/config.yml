@@ -1,0 +1,85 @@
+version: 2.1
+
+jobs:
+  lint:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            pip install ruff
+      - run:
+          name: Run Ruff lint
+          command: ruff check app tests
+
+  unit-tests:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            pip install -r requirements.txt
+            pip install pytest pytest-cov
+      - run:
+          name: Run unit tests
+          command: python -m pytest tests/unit -v --cov=app.sessions --cov-report=term-missing
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12
+    environment:
+      DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            pip install -r requirements.txt
+            pip install pytest httpx
+      - run:
+          name: Start PostgreSQL and Redis
+          command: |
+            docker run -d --name test-db 
+              -e POSTGRES_USER=appuser 
+              -e POSTGRES_PASSWORD=devpassword 
+              -e POSTGRES_DB=leaderboard 
+              -p 5432:5432 postgres:16
+            docker run -d --name test-redis 
+              -p 6379:6379 redis:7-alpine
+      - run:
+          name: Wait for services
+          command: |
+            for i in $(seq 1 30); do
+              pg_isready -h localhost -p 5432 && break
+              sleep 2
+            done
+            for i in $(seq 1 30); do
+              redis-cli -h localhost ping && break
+              sleep 2
+            done
+      - run:
+          name: Apply database migrations
+          command: |
+            PGPASSWORD=devpassword psql 
+              -h localhost -U appuser -d leaderboard 
+              -f migrations/001_schema.sql
+            PGPASSWORD=devpassword psql 
+              -h localhost -U appuser -d leaderboard 
+              -f migrations/002_seed.sql
+      - run:
+          name: Run integration tests
+          command: python -m pytest tests/integration -v
+
+workflows:
+  study-leaderboard-ci:
+    jobs:
+      - lint
+      - unit-tests
+      - integration-tests
