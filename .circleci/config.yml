@@ -1,85 +1,67 @@
+
 version: 2.1
 
 jobs:
-  lint:
+  lint-and-test:
     docker:
       - image: cimg/python:3.12
-    steps:
-      - checkout
-      - run:
-          name: Install dependencies
-          command: |
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
-            pip install ruff
-      - run:
-          name: Run Ruff lint
-          command: ruff check app tests
-
-  unit-tests:
-    docker:
-      - image: cimg/python:3.12
-    steps:
-      - checkout
-      - run:
-          name: Install dependencies
-          command: |
-            pip install -r requirements.txt
-            pip install pytest pytest-cov
-      - run:
-          name: Run unit tests
-          command: python -m pytest tests/unit -v --cov=app.sessions --cov-report=term-missing
-
-  integration-tests:
-    docker:
-      - image: cimg/python:3.12
+      - image: cimg/postgres:16.1
+        environment:
+          POSTGRES_USER: appuser
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: leaderboard
+      - image: cimg/redis:7.2
     environment:
       DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
       REDIS_URL: redis://localhost:6379/0
     steps:
       - checkout
+
       - run:
-          name: Install dependencies
+          name: Install system tools
           command: |
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client redis-tools
+
+      - run:
+          name: Install Python dependencies
+          command: |
+            python -m pip install --upgrade pip
             pip install -r requirements.txt
-            pip install pytest httpx
+            pip install pytest pytest-cov ruff
+
       - run:
-          name: Start PostgreSQL and Redis
-          command: |
-            docker run -d --name test-db 
-              -e POSTGRES_USER=appuser 
-              -e POSTGRES_PASSWORD=devpassword 
-              -e POSTGRES_DB=leaderboard 
-              -p 5432:5432 postgres:16
-            docker run -d --name test-redis 
-              -p 6379:6379 redis:7-alpine
-      - run:
-          name: Wait for services
+          name: Wait for PostgreSQL and Redis
           command: |
             for i in $(seq 1 30); do
-              pg_isready -h localhost -p 5432 && break
+              pg_isready -h localhost -U appuser && break
               sleep 2
             done
+            pg_isready -h localhost -U appuser
             for i in $(seq 1 30); do
               redis-cli -h localhost ping && break
               sleep 2
             done
+            redis-cli -h localhost ping
+
       - run:
           name: Apply database migrations
           command: |
-            PGPASSWORD=devpassword psql 
-              -h localhost -U appuser -d leaderboard 
-              -f migrations/001_schema.sql
-            PGPASSWORD=devpassword psql 
-              -h localhost -U appuser -d leaderboard 
-              -f migrations/002_seed.sql
+            for file in migrations/*.sql; do
+              PGPASSWORD=devpassword psql \
+                -h localhost -U appuser -d leaderboard \
+                -v ON_ERROR_STOP=1 -f "$file"
+            done
+
       - run:
-          name: Run integration tests
-          command: python -m pytest tests/integration -v
+          name: Ruff lint
+          command: ruff check app tests
+
+      - run:
+          name: Run tests with coverage
+          command: python -m pytest tests --cov=app --cov-report=term-missing
 
 workflows:
-  study-leaderboard-ci:
+  build-test:
     jobs:
-      - lint
-      - unit-tests
-      - integration-tests
+      - lint-and-test
