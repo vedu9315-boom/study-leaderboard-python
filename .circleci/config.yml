@@ -1,141 +1,72 @@
+
 version: 2.1
 
 jobs:
-  build-test-and-push:
+  build-test:
     docker:
       - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
+          REDIS_URL: redis://localhost:6379/0
+
       - image: cimg/postgres:16.1
         environment:
           POSTGRES_USER: appuser
           POSTGRES_PASSWORD: devpassword
           POSTGRES_DB: leaderboard
-      - image: cimg/redis:7.2
 
-    environment:
-      DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
-      REDIS_URL: redis://localhost:6379/0
+      - image: cimg/redis:7.2
 
     steps:
       - checkout
 
       - run:
-          name: Install system dependencies
-          command: |
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client
-
-      - run:
-          name: Install Python dependencies
+          name: Install dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
-            pip install pytest pytest-cov ruff
+            pip install pytest pytest-cov ruff redis
 
       - run:
           name: Wait for PostgreSQL and Redis
           command: |
-            set -e
-
-            echo "Waiting for PostgreSQL..."
-
             for i in $(seq 1 60); do
               if pg_isready -h localhost -p 5432 -U appuser; then
                 break
               fi
               sleep 2
             done
-
             pg_isready -h localhost -p 5432 -U appuser
 
-            echo "Waiting for Redis..."
-
             for i in $(seq 1 60); do
-              if (echo > /dev/tcp/localhost/6379) 2>/dev/null; then
-                echo "Redis is ready"
+              if python -c "import socket; s=socket.create_connection(('localhost',6379),2); s.close()" 2>/dev/null; then
                 break
               fi
               sleep 2
             done
 
-            (echo > /dev/tcp/localhost/6379) 2>/dev/null || {
-              echo "Redis did not become ready"
-              exit 1
-            }
+            python -c "import socket; s=socket.create_connection(('localhost',6379),2); s.close()"
 
       - run:
           name: Apply database migrations
           command: |
-            set -e
-
             for file in migrations/*.sql; do
-              if [ -f "$file" ]; then
-                echo "Applying migration: $file"
-
-                PGPASSWORD=devpassword psql \
-                  -h localhost \
-                  -p 5432 \
-                  -U appuser \
-                  -d leaderboard \
-                  -v ON_ERROR_STOP=1 \
-                  -f "$file"
-              fi
+              PGPASSWORD=devpassword psql \
+                -h localhost \
+                -p 5432 \
+                -U appuser \
+                -d leaderboard \
+                -v ON_ERROR_STOP=1 \
+                -f "$file"
             done
 
       - run:
           name: Run Ruff lint
-          command: |
-            ruff check app tests
+          command: ruff check app tests
 
       - run:
-          name: Run tests with coverage
-          command: |
-            python -m pytest tests \
-              --cov=app \
-              --cov-report=term-missing
-
-      - setup_remote_docker:
-          docker_layer_caching: true
-
-      - run:
-          name: Verify Docker Hub credentials
-          command: |
-            if [ -z "$DOCKERHUB_USERNAME" ]; then
-              echo "DOCKERHUB_USERNAME is not configured in CircleCI."
-              exit 1
-            fi
-
-            if [ -z "$DOCKERHUB_TOKEN" ]; then
-              echo "DOCKERHUB_TOKEN is not configured in CircleCI."
-              exit 1
-            fi
-
-            echo "Docker Hub variables are configured."
-
-      - run:
-          name: Login to Docker Hub
-          command: |
-            set -e
-
-            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
-              --username "$DOCKERHUB_USERNAME" \
-              --password-stdin
-
-      - run:
-          name: Build Docker image
-          command: |
-            set -e
-
-            docker build \
-              -t "${DOCKERHUB_USERNAME}/study-leaderboard-python:latest" \
-              .
-
-      - run:
-          name: Push Docker image
-          command: |
-            set -e
-
-            docker push \
-              "${DOCKERHUB_USERNAME}/study-leaderboard-python:latest"
+          name: Run tests
+          command: python -m pytest tests --cov=app --cov-report=term-missing
 
 workflows:
   build-test:
