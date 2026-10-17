@@ -1,4 +1,3 @@
-
 version: 2.1
 
 jobs:
@@ -33,36 +32,54 @@ jobs:
             pip install pytest pytest-cov ruff
 
       - run:
-          name: Wait for PostgreSQL and Redis
+          name: Wait for PostgreSQL
           command: |
             for i in $(seq 1 30); do
-              pg_isready -h localhost -U appuser && break
+              if pg_isready -h localhost -U appuser -d leaderboard; then
+                exit 0
+              fi
               sleep 2
             done
-            pg_isready -h localhost -U appuser
+            echo "PostgreSQL did not become ready"
+            exit 1
 
+      - run:
+          name: Wait for Redis
+          command: |
             for i in $(seq 1 30); do
-              redis-cli -h localhost ping && break
+              if redis-cli -h localhost ping | grep -q PONG; then
+                exit 0
+              fi
               sleep 2
             done
-            redis-cli -h localhost ping
+            echo "Redis did not become ready"
+            exit 1
 
       - run:
           name: Apply database migrations
           command: |
             for file in migrations/*.sql; do
+              echo "Applying $file"
               PGPASSWORD=devpassword psql \
-                -h localhost -U appuser -d leaderboard \
-                -v ON_ERROR_STOP=1 -f "$file"
+                -h localhost \
+                -U appuser \
+                -d leaderboard \
+                -v ON_ERROR_STOP=1 \
+                -f "$file"
             done
 
       - run:
           name: Ruff lint
-          command: ruff check app tests
+          command: |
+            ruff check app tests
 
       - run:
           name: Run tests with coverage
-          command: python -m pytest tests --cov=app --cov-report=term-missing
+          command: |
+            python -m pytest tests \
+              --cov=app \
+              --cov-report=term-missing
+
 
   build-and-push:
     docker:
@@ -70,35 +87,58 @@ jobs:
 
     steps:
       - checkout
+
       - setup_remote_docker
 
       - run:
-          name: Check Docker Hub credentials
+          name: Verify Docker Hub credentials
           command: |
-            test -n "$DOCKERHUB_USERNAME"
-            test -n "$DOCKERHUB_TOKEN"
+            if [ -z "${DOCKERHUB_USERNAME:-}" ]; then
+              echo "ERROR: DOCKERHUB_USERNAME is missing in CircleCI"
+              exit 1
+            fi
+
+            if [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "ERROR: DOCKERHUB_TOKEN is missing in CircleCI"
+              exit 1
+            fi
+
+            echo "Docker Hub credentials are configured."
 
       - run:
           name: Log in to Docker Hub
           command: |
-            printf '%s' "$DOCKERHUB_TOKEN" | tr -d '\r\n' | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+            set +x
+
+            printf '%s' "$DOCKERHUB_TOKEN" |
+              docker login \
+                --username "$DOCKERHUB_USERNAME" \
+                --password-stdin
+
       - run:
           name: Build Docker image
           command: |
+            IMAGE="$DOCKERHUB_USERNAME/study-leaderboard-python"
+
             docker build \
-              -t "$DOCKERHUB_USERNAME/study-leaderboard-python:latest" \
-              -t "$DOCKERHUB_USERNAME/study-leaderboard-python:$CIRCLE_SHA1" .
+              -t "$IMAGE:$CIRCLE_SHA1" \
+              -t "$IMAGE:latest" \
+              .
 
       - run:
           name: Push Docker image
           command: |
-            docker push "$DOCKERHUB_USERNAME/study-leaderboard-python:latest"
-            docker push "$DOCKERHUB_USERNAME/study-leaderboard-python:$CIRCLE_SHA1"
+            IMAGE="$DOCKERHUB_USERNAME/study-leaderboard-python"
+
+            docker push "$IMAGE:$CIRCLE_SHA1"
+            docker push "$IMAGE:latest"
+
 
 workflows:
-  build-test:
+  build-test-and-publish:
     jobs:
       - lint-and-test
+
       - build-and-push:
           requires:
             - lint-and-test
