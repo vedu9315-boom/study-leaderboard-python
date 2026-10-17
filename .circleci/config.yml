@@ -78,9 +78,10 @@ jobs:
             test -n "$DOCKERHUB_USERNAME"
             test -n "$DOCKERHUB_TOKEN"
 
-      - run:
+            - run:
           name: Log in to Docker Hub
           command: |
+            set -eo pipefail
             printf '%s' "$DOCKERHUB_TOKEN" | docker login \
               --username "$DOCKERHUB_USERNAME" \
               --password-stdin
