@@ -1,147 +1,127 @@
 version: 2.1
 
 jobs:
-  lint-and-test:
+  build-test-and-push:
     docker:
       - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
+          REDIS_URL: redis://localhost:6379/0
+
       - image: cimg/postgres:16.1
         environment:
           POSTGRES_USER: appuser
           POSTGRES_PASSWORD: devpassword
           POSTGRES_DB: leaderboard
-      - image: cimg/redis:7.2
 
-    environment:
-      DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
-      REDIS_URL: redis://localhost:6379/0
+      - image: cimg/redis:7.2
 
     steps:
       - checkout
 
+      # Install dependencies
       - run:
-          name: Install system tools
-          command: |
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client redis-tools
-
-      - run:
-          name: Install Python dependencies
+          name: Install dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
             pip install pytest pytest-cov ruff
 
+      # Wait for PostgreSQL and Redis
       - run:
-          name: Wait for PostgreSQL
+          name: Wait for database and Redis
           command: |
             for i in $(seq 1 30); do
-              if pg_isready -h localhost -U appuser -d leaderboard; then
-                exit 0
+              if pg_isready -h localhost -p 5432 -U appuser; then
+                break
               fi
               sleep 2
             done
-            echo "PostgreSQL did not become ready"
-            exit 1
 
-      - run:
-          name: Wait for Redis
-          command: |
+            pg_isready -h localhost -p 5432 -U appuser
+
             for i in $(seq 1 30); do
-              if redis-cli -h localhost ping | grep -q PONG; then
-                exit 0
+              if redis-cli -h localhost -p 6379 ping | grep -q PONG; then
+                break
               fi
               sleep 2
             done
-            echo "Redis did not become ready"
-            exit 1
 
+            redis-cli -h localhost -p 6379 ping
+
+      # Apply database migrations
       - run:
           name: Apply database migrations
           command: |
             for file in migrations/*.sql; do
-              echo "Applying $file"
+              echo "Applying migration: $file"
               PGPASSWORD=devpassword psql \
                 -h localhost \
+                -p 5432 \
                 -U appuser \
                 -d leaderboard \
                 -v ON_ERROR_STOP=1 \
                 -f "$file"
             done
 
+      # Check Python code
       - run:
           name: Ruff lint
           command: |
             ruff check app tests
 
+      # Run tests
       - run:
-          name: Run tests with coverage
+          name: Run tests
           command: |
             python -m pytest tests \
               --cov=app \
               --cov-report=term-missing
 
-
-  build-and-push:
-    docker:
-      - image: cimg/base:stable
-
-    steps:
-      - checkout
-
-      - setup_remote_docker
-
+      # Verify Docker Hub credentials without displaying the token
       - run:
           name: Verify Docker Hub credentials
           command: |
-            if [ -z "${DOCKERHUB_USERNAME:-}" ]; then
-              echo "ERROR: DOCKERHUB_USERNAME is missing in CircleCI"
+            if [ -z "$DOCKERHUB_USERNAME" ]; then
+              echo "DOCKERHUB_USERNAME is missing."
               exit 1
             fi
 
-            if [ -z "${DOCKERHUB_TOKEN:-}" ]; then
-              echo "ERROR: DOCKERHUB_TOKEN is missing in CircleCI"
+            if [ -z "$DOCKERHUB_TOKEN" ]; then
+              echo "DOCKERHUB_TOKEN is missing."
               exit 1
             fi
 
-            echo "Docker Hub credentials are configured."
+            echo "Docker Hub credential variables are present."
+
+      # Log in to Docker Hub
+      - setup_remote_docker:
+          docker_layer_caching: true
 
       - run:
           name: Log in to Docker Hub
           command: |
             set +x
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USERNAME" \
+              --password-stdin
 
-            printf '%s' "$DOCKERHUB_TOKEN" |
-              docker login \
-                --username "$DOCKERHUB_USERNAME" \
-                --password-stdin
-
+      # Build the Docker image
       - run:
           name: Build Docker image
           command: |
-            IMAGE="$DOCKERHUB_USERNAME/study-leaderboard-python"
-
             docker build \
-              -t "$IMAGE:$CIRCLE_SHA1" \
-              -t "$IMAGE:latest" \
+              -t "$DOCKERHUB_USERNAME/study-leaderboard-python:latest" \
               .
 
+      # Push the image
       - run:
           name: Push Docker image
           command: |
-            IMAGE="$DOCKERHUB_USERNAME/study-leaderboard-python"
-
-            docker push "$IMAGE:$CIRCLE_SHA1"
-            docker push "$IMAGE:latest"
-
+            docker push \
+              "$DOCKERHUB_USERNAME/study-leaderboard-python:latest"
 
 workflows:
   build-test-and-publish:
     jobs:
-      - lint-and-test
-
-      - build-and-push:
-          requires:
-            - lint-and-test
-          filters:
-            branches:
-              only: main
+      - build-test-and-push
