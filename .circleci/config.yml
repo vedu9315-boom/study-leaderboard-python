@@ -81,11 +81,7 @@ jobs:
       - run:
           name: Log in to Docker Hub
           command: |
-            if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
-              echo "Docker Hub username or token is missing"
-              exit 1
-            fi
-            printf '%s' "$DOCKERHUB_TOKEN" | tr -d '\r\n' | docker login --username "$DOCKERHUB_USERNAME" --password-stdin    
+            printf '%s' "$DOCKERHUB_TOKEN" | tr -d '\r\n' | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
       - run:
           name: Build Docker image
           command: |
