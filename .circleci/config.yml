@@ -1,4 +1,3 @@
-
 version: 2.1
 
 jobs:
@@ -30,7 +29,7 @@ jobs:
             pip install pytest pytest-cov ruff redis
 
       - run:
-          name: Wait for PostgreSQL and Redis
+          name: Wait for PostgreSQL
           command: |
             for i in $(seq 1 60); do
               if pg_isready -h localhost -p 5432 -U appuser; then
@@ -40,21 +39,35 @@ jobs:
             done
             pg_isready -h localhost -p 5432 -U appuser
 
-            for i in $(seq 1 60); do
-              if python -c "import socket; s=socket.create_connection(('localhost',6379),2); s.close()" 2>/dev/null; then
-                break
-              fi
-              sleep 2
-            done
-            python -c "import socket; s=socket.create_connection(('localhost',6379),2); s.close()"
+      - run:
+          name: Wait for Redis
+          command: |
+            python - <<'PY'
+            import socket
+            import time
+
+            for attempt in range(60):
+                try:
+                    with socket.create_connection(("localhost", 6379), timeout=2):
+                        print("Redis is ready")
+                        break
+                except OSError:
+                    if attempt == 59:
+                        raise
+                    time.sleep(2)
+            PY
 
       - run:
           name: Apply database migrations
           command: |
             for file in migrations/*.sql; do
               PGPASSWORD=devpassword psql \
-                -h localhost -p 5432 -U appuser \
-                -d leaderboard -v ON_ERROR_STOP=1 -f "$file"
+                -h localhost \
+                -p 5432 \
+                -U appuser \
+                -d leaderboard \
+                -v ON_ERROR_STOP=1 \
+                -f "$file"
             done
 
       - run:
@@ -71,11 +84,13 @@ jobs:
 
     steps:
       - checkout
+
       - setup_remote_docker
 
       - run:
-          name: Check Docker Hub credentials
+          name: Verify Docker Hub credentials
           command: |
+            set -eu
             test -n "$DOCKERHUB_USERNAME"
             test -n "$DOCKERHUB_TOKEN"
             echo "Docker Hub variables are configured."
@@ -83,6 +98,7 @@ jobs:
       - run:
           name: Log in to Docker Hub
           command: |
+            set -eu
             printf '%s' "$DOCKERHUB_TOKEN" | docker login \
               --username "$DOCKERHUB_USERNAME" \
               --password-stdin
@@ -90,15 +106,20 @@ jobs:
       - run:
           name: Build Docker image
           command: |
+            set -eu
             IMAGE_NAME="${DOCKERHUB_USERNAME}/study-leaderboard-python"
+
             docker build \
               -t "${IMAGE_NAME}:${CIRCLE_SHA1}" \
-              -t "${IMAGE_NAME}:latest" .
+              -t "${IMAGE_NAME}:latest" \
+              .
 
       - run:
           name: Push Docker image
           command: |
+            set -eu
             IMAGE_NAME="${DOCKERHUB_USERNAME}/study-leaderboard-python"
+
             docker push "${IMAGE_NAME}:${CIRCLE_SHA1}"
             docker push "${IMAGE_NAME}:latest"
 
@@ -106,6 +127,7 @@ workflows:
   build-test-and-publish:
     jobs:
       - build-test
+
       - build-and-push:
           requires:
             - build-test
