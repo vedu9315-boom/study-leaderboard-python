@@ -1,3 +1,4 @@
+
 version: 2.1
 
 jobs:
@@ -19,18 +20,17 @@ jobs:
     steps:
       - checkout
 
-      # Install dependencies
       - run:
           name: Install dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
-            pip install pytest pytest-cov ruff
+            pip install pytest pytest-cov ruff "psycopg[binary]"
 
-      # Wait for PostgreSQL and Redis
       - run:
-          name: Wait for database and Redis
+          name: Wait for PostgreSQL and Redis
           command: |
+            # Wait for PostgreSQL
             for i in $(seq 1 30); do
               if pg_isready -h localhost -p 5432 -U appuser; then
                 break
@@ -40,16 +40,30 @@ jobs:
 
             pg_isready -h localhost -p 5432 -U appuser
 
-            for i in $(seq 1 30); do
-              if redis-cli -h localhost -p 6379 ping | grep -q PONG; then
-                break
-              fi
-              sleep 2
-            done
+            # Wait for Redis using Python (redis-cli is not required)
+            python - <<'PY'
+            import socket
+            import time
 
-            redis-cli -h localhost -p 6379 ping
+            for attempt in range(30):
+                try:
+                    with socket.create_connection(
+                        ("localhost", 6379), timeout=2
+                    ) as connection:
+                        connection.sendall(b"*1\r\n$4\r\nPING\r\n")
+                        response = connection.recv(1024)
 
-      # Apply database migrations
+                        if b"+PONG" in response:
+                            print("Redis is ready.")
+                            break
+                except OSError:
+                    pass
+
+                time.sleep(2)
+            else:
+                raise SystemExit("Redis did not become ready.")
+            PY
+
       - run:
           name: Apply database migrations
           command: |
@@ -64,23 +78,22 @@ jobs:
                 -f "$file"
             done
 
-      # Check Python code
       - run:
           name: Ruff lint
-          command: |
-            ruff check app tests
+          command: ruff check app tests
 
-      # Run tests
       - run:
-          name: Run tests
+          name: Run tests with coverage
           command: |
             python -m pytest tests \
               --cov=app \
               --cov-report=term-missing
 
-      # Verify Docker Hub credentials without displaying the token
+      - setup_remote_docker:
+          docker_layer_caching: true
+
       - run:
-          name: Verify Docker Hub credentials
+          name: Verify Docker Hub variables
           command: |
             if [ -z "$DOCKERHUB_USERNAME" ]; then
               echo "DOCKERHUB_USERNAME is missing."
@@ -92,11 +105,7 @@ jobs:
               exit 1
             fi
 
-            echo "Docker Hub credential variables are present."
-
-      # Log in to Docker Hub
-      - setup_remote_docker:
-          docker_layer_caching: true
+            echo "Docker Hub variables are present."
 
       - run:
           name: Log in to Docker Hub
@@ -106,7 +115,6 @@ jobs:
               --username "$DOCKERHUB_USERNAME" \
               --password-stdin
 
-      # Build the Docker image
       - run:
           name: Build Docker image
           command: |
@@ -114,7 +122,6 @@ jobs:
               -t "$DOCKERHUB_USERNAME/study-leaderboard-python:latest" \
               .
 
-      # Push the image
       - run:
           name: Push Docker image
           command: |
