@@ -21,8 +21,10 @@ jobs:
       - checkout
 
       - run:
-          name: Install dependencies
+          name: Install dependencies and tools
           command: |
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
             python -m pip install --upgrade pip
             pip install -r requirements.txt
             pip install pytest pytest-cov ruff redis
@@ -44,7 +46,6 @@ jobs:
               fi
               sleep 2
             done
-
             python -c "import socket; s=socket.create_connection(('localhost',6379),2); s.close()"
 
       - run:
@@ -52,12 +53,8 @@ jobs:
           command: |
             for file in migrations/*.sql; do
               PGPASSWORD=devpassword psql \
-                -h localhost \
-                -p 5432 \
-                -U appuser \
-                -d leaderboard \
-                -v ON_ERROR_STOP=1 \
-                -f "$file"
+                -h localhost -p 5432 -U appuser \
+                -d leaderboard -v ON_ERROR_STOP=1 -f "$file"
             done
 
       - run:
@@ -65,10 +62,53 @@ jobs:
           command: ruff check app tests
 
       - run:
-          name: Run tests
+          name: Run tests with coverage
           command: python -m pytest tests --cov=app --cov-report=term-missing
 
+  build-and-push:
+    docker:
+      - image: cimg/base:stable
+
+    steps:
+      - checkout
+      - setup_remote_docker
+
+      - run:
+          name: Check Docker Hub credentials
+          command: |
+            test -n "$DOCKERHUB_USERNAME"
+            test -n "$DOCKERHUB_TOKEN"
+            echo "Docker Hub variables are configured."
+
+      - run:
+          name: Log in to Docker Hub
+          command: |
+            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USERNAME" \
+              --password-stdin
+
+      - run:
+          name: Build Docker image
+          command: |
+            IMAGE_NAME="${DOCKERHUB_USERNAME}/study-leaderboard-python"
+            docker build \
+              -t "${IMAGE_NAME}:${CIRCLE_SHA1}" \
+              -t "${IMAGE_NAME}:latest" .
+
+      - run:
+          name: Push Docker image
+          command: |
+            IMAGE_NAME="${DOCKERHUB_USERNAME}/study-leaderboard-python"
+            docker push "${IMAGE_NAME}:${CIRCLE_SHA1}"
+            docker push "${IMAGE_NAME}:latest"
+
 workflows:
-  build-test:
+  build-test-and-publish:
     jobs:
       - build-test
+      - build-and-push:
+          requires:
+            - build-test
+          filters:
+            branches:
+              only: main
