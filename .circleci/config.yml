@@ -1,37 +1,44 @@
-
 version: 2.1
 
 jobs:
   build-test-and-push:
     docker:
       - image: cimg/python:3.12
-        environment:
-          DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
-          REDIS_URL: redis://localhost:6379/0
-
       - image: cimg/postgres:16.1
         environment:
           POSTGRES_USER: appuser
           POSTGRES_PASSWORD: devpassword
           POSTGRES_DB: leaderboard
-
       - image: cimg/redis:7.2
+
+    environment:
+      DATABASE_URL: postgresql://appuser:devpassword@localhost:5432/leaderboard
+      REDIS_URL: redis://localhost:6379/0
 
     steps:
       - checkout
 
       - run:
-          name: Install dependencies
+          name: Install system dependencies
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+
+      - run:
+          name: Install Python dependencies
           command: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
-            pip install pytest pytest-cov ruff "psycopg[binary]"
+            pip install pytest pytest-cov ruff
 
       - run:
           name: Wait for PostgreSQL and Redis
           command: |
-            # Wait for PostgreSQL
-            for i in $(seq 1 30); do
+            set -e
+
+            echo "Waiting for PostgreSQL..."
+
+            for i in $(seq 1 60); do
               if pg_isready -h localhost -p 5432 -U appuser; then
                 break
               fi
@@ -40,47 +47,44 @@ jobs:
 
             pg_isready -h localhost -p 5432 -U appuser
 
-            # Wait for Redis using Python (redis-cli is not required)
-            python - <<'PY'
-            import socket
-            import time
+            echo "Waiting for Redis..."
 
-            for attempt in range(30):
-                try:
-                    with socket.create_connection(
-                        ("localhost", 6379), timeout=2
-                    ) as connection:
-                        connection.sendall(b"*1\r\n$4\r\nPING\r\n")
-                        response = connection.recv(1024)
+            for i in $(seq 1 60); do
+              if (echo > /dev/tcp/localhost/6379) 2>/dev/null; then
+                echo "Redis is ready"
+                break
+              fi
+              sleep 2
+            done
 
-                        if b"+PONG" in response:
-                            print("Redis is ready.")
-                            break
-                except OSError:
-                    pass
-
-                time.sleep(2)
-            else:
-                raise SystemExit("Redis did not become ready.")
-            PY
+            (echo > /dev/tcp/localhost/6379) 2>/dev/null || {
+              echo "Redis did not become ready"
+              exit 1
+            }
 
       - run:
           name: Apply database migrations
           command: |
+            set -e
+
             for file in migrations/*.sql; do
-              echo "Applying migration: $file"
-              PGPASSWORD=devpassword psql \
-                -h localhost \
-                -p 5432 \
-                -U appuser \
-                -d leaderboard \
-                -v ON_ERROR_STOP=1 \
-                -f "$file"
+              if [ -f "$file" ]; then
+                echo "Applying migration: $file"
+
+                PGPASSWORD=devpassword psql \
+                  -h localhost \
+                  -p 5432 \
+                  -U appuser \
+                  -d leaderboard \
+                  -v ON_ERROR_STOP=1 \
+                  -f "$file"
+              fi
             done
 
       - run:
-          name: Ruff lint
-          command: ruff check app tests
+          name: Run Ruff lint
+          command: |
+            ruff check app tests
 
       - run:
           name: Run tests with coverage
@@ -93,24 +97,25 @@ jobs:
           docker_layer_caching: true
 
       - run:
-          name: Verify Docker Hub variables
+          name: Verify Docker Hub credentials
           command: |
             if [ -z "$DOCKERHUB_USERNAME" ]; then
-              echo "DOCKERHUB_USERNAME is missing."
+              echo "DOCKERHUB_USERNAME is not configured in CircleCI."
               exit 1
             fi
 
             if [ -z "$DOCKERHUB_TOKEN" ]; then
-              echo "DOCKERHUB_TOKEN is missing."
+              echo "DOCKERHUB_TOKEN is not configured in CircleCI."
               exit 1
             fi
 
-            echo "Docker Hub variables are present."
+            echo "Docker Hub variables are configured."
 
       - run:
-          name: Log in to Docker Hub
+          name: Login to Docker Hub
           command: |
-            set +x
+            set -e
+
             printf '%s' "$DOCKERHUB_TOKEN" | docker login \
               --username "$DOCKERHUB_USERNAME" \
               --password-stdin
@@ -118,17 +123,21 @@ jobs:
       - run:
           name: Build Docker image
           command: |
+            set -e
+
             docker build \
-              -t "$DOCKERHUB_USERNAME/study-leaderboard-python:latest" \
+              -t "${DOCKERHUB_USERNAME}/study-leaderboard-python:latest" \
               .
 
       - run:
           name: Push Docker image
           command: |
+            set -e
+
             docker push \
-              "$DOCKERHUB_USERNAME/study-leaderboard-python:latest"
+              "${DOCKERHUB_USERNAME}/study-leaderboard-python:latest"
 
 workflows:
-  build-test-and-publish:
+  build-test:
     jobs:
-      - build-test-and-push
+      - build-test
